@@ -30,3 +30,17 @@ idf.py -p /dev/{DEVICE_PORT} flash
 ```
 
 
+
+## Hardware-in-the-loop benchmark (this fork)
+
+This fork adds a continuous benchmark: every push builds the firmware and
+measures real inference speed on a physical ESP32-S3 (8MB octal PSRAM).
+
+- `.github/workflows/benchmark.yml` — builds with ESP-IDF v5.3 on a
+  GitHub-hosted runner, then a self-hosted runner (Raspberry Pi 5) leases the
+  board through a [jumpstarter](https://jumpstarter.dev) controller, flashes
+  the merged image and parses `achieved tok/s` from the serial console.
+- `scripts/benchmark.py` — the jumpstarter client script (flash, reset,
+  capture serial, report mean/min/max over 3 runs).
+
+Results are published in the workflow run's step summary.

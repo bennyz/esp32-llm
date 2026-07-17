@@ -1,0 +1,90 @@
+name: benchmark
+
+# Note: no pull_request trigger on purpose — the benchmark job runs on a
+# self-hosted runner attached to real hardware, so only trusted pushes to
+# this repository may trigger it.
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: esp32-board
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          idf.py build
+
+      - name: Merge flash image
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          cd build
+          esptool.py --chip esp32s3 merge_bin -o merged.bin @flash_args
+          ls -l merged.bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/merged.bin
+          if-no-files-found: error
+
+  benchmark:
+    needs: build
+    runs-on: [self-hosted, esp32]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: firmware
+
+      - name: Flash and measure tok/s (via jumpstarter lease)
+        run: |
+          podman run --rm --network host --userns keep-id -e HOME=/tmp \
+            -v "$HOME/.config/jumpstarter/ci-client.yaml:/tmp/ci.yaml:ro,z" \
+            -v "$PWD:/workspace:z" -w /workspace \
+            quay.io/jumpstarter-dev/jumpstarter:latest \
+            jmp shell --client-config /tmp/ci.yaml --selector board=esp32 -- \
+            python scripts/benchmark.py firmware/merged.bin --runs 3 --out result.json
+
+      - name: Report results
+        run: |
+          python3 - <<'EOF'
+          import json, os
+
+          with open("result.json") as f:
+              r = json.load(f)
+
+          runs = " · ".join(f"{v:.2f}" for v in r["runs"])
+          lines = [
+              "## ESP32 LLM benchmark",
+              "",
+              f"**{r['mean']:.2f} tok/s** (mean of {len(r['runs'])} runs)",
+              "",
+              "| metric | tok/s |",
+              "|--------|-------|",
+              f"| mean | {r['mean']:.2f} |",
+              f"| min | {r['min']:.2f} |",
+              f"| max | {r['max']:.2f} |",
+              "",
+              f"runs: {runs}",
+              f"chip: `{r['chip']}`",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines) + "\n")
+          EOF

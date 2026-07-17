@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <inttypes.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_spiffs.h"
 #include "sdkconfig.h"
 #include "esp_err.h"
@@ -25,6 +27,10 @@ u8g2_t u8g2;
  */
 void init_display(void)
 {
+#if !CONFIG_LLM_USE_DISPLAY
+    ESP_LOGI(TAG, "Display disabled (CONFIG_LLM_USE_DISPLAY=n)");
+    return;
+#else
     u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
     u8g2_esp32_hal.bus.i2c.sda = PIN_SDA;
     u8g2_esp32_hal.bus.i2c.scl = PIN_SCL;
@@ -43,6 +49,7 @@ void init_display(void)
     u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
     u8g2_SendBuffer(&u8g2);
     ESP_LOGI(TAG, "Display initialized");
+#endif
 }
 
 /**
@@ -98,9 +105,13 @@ void init_storage(void)
  */
 void write_display(char *text)
 {
+#if CONFIG_LLM_USE_DISPLAY
     u8g2_ClearBuffer(&u8g2);
     u8g2_DrawStr(&u8g2, 0, u8g2_GetDisplayHeight(&u8g2) / 2, text);
     u8g2_SendBuffer(&u8g2);
+#else
+    (void)text;
+#endif
 }
 
 /**
@@ -121,8 +132,10 @@ void generate_complete_cb(float tk_s)
  */
 void draw_llama(void)
 {
+#if CONFIG_LLM_USE_DISPLAY
     u8g2_DrawXBM(&u8g2, 0, 0, u8g2_GetDisplayWidth(&u8g2), u8g2_GetDisplayHeight(&u8g2), &llama_bmp);
     u8g2_SendBuffer(&u8g2);
+#endif
 }
 
 void app_main(void)
@@ -138,7 +151,7 @@ void app_main(void)
     float topp = 0.9f;               // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
     int steps = 256;                 // number of steps to run for
     char *prompt = NULL;             // prompt string
-    unsigned long long rng_seed = 0; // seed rng with time by default
+    unsigned long long rng_seed = CONFIG_LLM_FIXED_SEED; // 0 = seed rng with time
 
     // parameter validation/overrides
     if (rng_seed <= 0)
@@ -161,5 +174,13 @@ void app_main(void)
 
     // run!
     draw_llama();
+#if CONFIG_LLM_GENERATE_LOOP
+    while (1)
+    {
+        generate(&transformer, &tokenizer, &sampler, prompt, steps, &generate_complete_cb);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+#else
     generate(&transformer, &tokenizer, &sampler, prompt, steps, &generate_complete_cb);
+#endif
 }

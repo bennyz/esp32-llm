@@ -1,0 +1,47 @@
+menu "Example Configuration"
+
+    config LLM_USE_DISPLAY
+        bool "Enable SSD1306 OLED display output"
+        default y
+        help
+            Show generation progress and tok/s on an SSD1306 display over
+            I2C. Disable when no display is attached, otherwise the u8g2
+            HAL asserts on the failed I2C transaction.
+
+    config LLM_FIXED_SEED
+        int "Fixed RNG seed (0 = seed from time)"
+        default 0
+        help
+            Seed for the sampler RNG. A non-zero value makes generation
+            deterministic, which lets CI compare the generated text across
+            runs to detect numerical changes.
+
+    config LLM_GENERATE_LOOP
+        bool "Generate in an endless loop"
+        default n
+        help
+            Restart generation after each completion instead of stopping.
+            Used by the CI benchmark to take several measurements without
+            resetting the chip.
+
+    menu "I2C Master"
+        config I2C_MASTER_SCL
+            int "SCL GPIO Num"
+            default 9
+            help
+                GPIO number for I2C Master clock line.
+
+        config I2C_MASTER_SDA
+            int "SDA GPIO Num"
+            default 8
+            help
+                GPIO number for I2C Master data line.
+
+        config I2C_MASTER_FREQUENCY
+            int "Master Frequency"
+            default 400000
+            help
+                I2C Speed of Master device.
+    endmenu
+
+endmenu

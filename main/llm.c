@@ -18,6 +18,20 @@
 #include "esp_system.h"
 #include "esp_dsp.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
+
+// dsps_dotprod_f32_aes3 uses 128-bit SIMD loads that require 16-byte aligned
+// buffers; plain malloc/calloc only guarantee word alignment, and unaligned
+// SIMD loads silently read from a rounded-down address (garbage results).
+static void *aligned_calloc16(size_t nmemb, size_t size)
+{
+    void *p = heap_caps_aligned_alloc(16, nmemb * size, MALLOC_CAP_DEFAULT);
+    if (p != NULL)
+    {
+        memset(p, 0, nmemb * size);
+    }
+    return p;
+}
 
 #define MAP_FAILED NULL
 #define munmap(ptr, length) custom_munmap(ptr)
@@ -94,16 +108,16 @@ void malloc_run_state(RunState *s, Config *p)
 {
     // we calloc instead of malloc to keep valgrind happy
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-    s->x = calloc(p->dim, sizeof(v4sf));
-    s->xb = calloc(p->dim, sizeof(v4sf));
-    s->xb2 = calloc(p->dim, sizeof(v4sf));
-    s->hb = calloc(p->hidden_dim, sizeof(v4sf));
-    s->hb2 = calloc(p->hidden_dim, sizeof(v4sf));
-    s->q = calloc(p->dim, sizeof(v4sf));
-    s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(v4sf));
-    s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(v4sf));
-    s->att = calloc(p->n_heads * p->seq_len, sizeof(v4sf));
-    s->logits = calloc(p->vocab_size, sizeof(v4sf));
+    s->x = aligned_calloc16(p->dim, sizeof(v4sf));
+    s->xb = aligned_calloc16(p->dim, sizeof(v4sf));
+    s->xb2 = aligned_calloc16(p->dim, sizeof(v4sf));
+    s->hb = aligned_calloc16(p->hidden_dim, sizeof(v4sf));
+    s->hb2 = aligned_calloc16(p->hidden_dim, sizeof(v4sf));
+    s->q = aligned_calloc16(p->dim, sizeof(v4sf));
+    s->key_cache = aligned_calloc16(p->n_layers * p->seq_len * kv_dim, sizeof(v4sf));
+    s->value_cache = aligned_calloc16(p->n_layers * p->seq_len * kv_dim, sizeof(v4sf));
+    s->att = aligned_calloc16(p->n_heads * p->seq_len, sizeof(v4sf));
+    s->logits = aligned_calloc16(p->vocab_size, sizeof(v4sf));
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->key_cache || !s->value_cache || !s->att || !s->logits)
     {
@@ -182,12 +196,17 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     fseek(file, 0, SEEK_SET); // move back to beginning for reading
     ESP_LOGI(TAG, "File size: %zu bytes", *file_size);
     ESP_LOGI(TAG, "Free ram available: %lu", esp_get_free_heap_size());
-    *data = malloc(*file_size);
-    if (*data == NULL)
+    // The 28-byte Config header precedes the weights in the file. Place the
+    // buffer at alignedBase+4 so the weights (offset 28) start 16-byte
+    // aligned for the SIMD dot products. The buffer lives for the whole
+    // program run and is never freed.
+    void *aligned_base = heap_caps_aligned_alloc(16, *file_size + 16, MALLOC_CAP_DEFAULT);
+    if (aligned_base == NULL)
     {
         ESP_LOGE(TAG, "Malloc operation failed");
         exit(EXIT_FAILURE);
     }
+    *data = (v4sf *)((char *)aligned_base + 4);
     // Read the entire file into memory
     size_t bytes_read = fread(*data, 1, *file_size, file);
     if (bytes_read != *file_size)
@@ -940,7 +959,7 @@ int sample_topp(v4sf *probabilities, int n, v4sf topp, ProbIndex *probindex, v4s
     return probindex[last_idx].index; // in case of rounding errors
 }
 
-void build_sampler(Sampler *sampler, int vocab_size, v4sf temperature, v4sf topp, unsigned long long rng_seed)
+void build_sampler(Sampler *sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed)
 {
     sampler->vocab_size = vocab_size;
     sampler->temperature = temperature;
