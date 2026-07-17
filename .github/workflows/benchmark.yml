@@ -12,6 +12,9 @@ concurrency:
   group: esp32-board
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,7 +35,9 @@ jobs:
         run: |
           . "$IDF_PATH/export.sh"
           cd build
-          esptool.py --chip esp32s3 merge_bin -o merged.bin @flash_args
+          # merge_bin does not accept --flash_size detect
+          sed 's/--flash_size detect/--flash_size keep/' flash_args > merge_args
+          esptool.py --chip esp32s3 merge_bin -o merged.bin @merge_args
           ls -l merged.bin
 
       - uses: actions/upload-artifact@v4
@@ -62,29 +67,26 @@ jobs:
             jmp shell --client-config /tmp/ci.yaml --selector board=esp32 -- \
             python scripts/benchmark.py firmware/merged.bin --runs 3 --out result.json
 
-      - name: Report results
+      - name: Fetch baseline
         run: |
-          python3 - <<'EOF'
-          import json, os
+          git fetch origin benchmark-data || true
+          git show origin/benchmark-data:baseline.json > baseline.json 2>/dev/null \
+            || echo "no baseline available yet"
 
-          with open("result.json") as f:
-              r = json.load(f)
+      - name: Compare against baseline
+        run: python3 scripts/compare_benchmark.py result.json --baseline baseline.json
 
-          runs = " · ".join(f"{v:.2f}" for v in r["runs"])
-          lines = [
-              "## ESP32 LLM benchmark",
-              "",
-              f"**{r['mean']:.2f} tok/s** (mean of {len(r['runs'])} runs)",
-              "",
-              "| metric | tok/s |",
-              "|--------|-------|",
-              f"| mean | {r['mean']:.2f} |",
-              f"| min | {r['min']:.2f} |",
-              f"| max | {r['max']:.2f} |",
-              "",
-              f"runs: {runs}",
-              f"chip: `{r['chip']}`",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              f.write("\n".join(lines) + "\n")
-          EOF
+      - name: Update baseline (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "benchmark-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch origin benchmark-data
+          git worktree add "$RUNNER_TEMP/bdata" benchmark-data
+          cp result.json "$RUNNER_TEMP/bdata/baseline.json"
+          cd "$RUNNER_TEMP/bdata"
+          git add baseline.json
+          git commit -m "baseline from $GITHUB_SHA" || echo "baseline unchanged"
+          git push origin benchmark-data
+          cd -
+          git worktree remove --force "$RUNNER_TEMP/bdata"
