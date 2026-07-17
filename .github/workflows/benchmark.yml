@@ -28,7 +28,21 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
-          idf.py build
+          # The IDF component manager occasionally reports a git-sourced
+          # component (u8g2) as "corrupted" on a racy download. Retry the
+          # dependency resolution + build with a clean slate a few times.
+          for attempt in 1 2 3; do
+            echo "::group::build attempt $attempt"
+            if idf.py build; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "build attempt $attempt failed, cleaning and retrying"
+            rm -rf build managed_components dependencies.lock
+          done
+          echo "build failed after 3 attempts"
+          exit 1
 
       - name: Merge flash image
         shell: bash
