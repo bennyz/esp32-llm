@@ -38,3 +38,5 @@ cc -O2 -o ppl ppl.c -lm
 Then update `perplexity` (and `n_tokens`/`nll`) in `golden.json`. Updating the
 golden value is a deliberate act — it redefines "correct", so it belongs in a
 reviewed commit, never an automated one.
+
+<!-- demo: exercise the CI PR-comment path -->
