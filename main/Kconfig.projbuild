@@ -24,6 +24,16 @@ menu "Example Configuration"
             Used by the CI benchmark to take several measurements without
             resetting the chip.
 
+    config LLM_EVAL
+        bool "Correctness eval mode (teacher-forced perplexity)"
+        default n
+        help
+            Instead of generating a story, run the correctness eval: compute
+            teacher-forced perplexity over a fixed reference sentence and
+            print "perplexity: <float>". CI compares this against the golden
+            value in eval/golden.json to catch code changes that corrupt the
+            model numerics (e.g. a fast-but-wrong SIMD/alignment change).
+
     menu "I2C Master"
         config I2C_MASTER_SCL
             int "SCL GPIO Num"

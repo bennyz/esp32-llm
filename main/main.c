@@ -168,12 +168,35 @@ void app_main(void)
     Tokenizer tokenizer;
     build_tokenizer(&tokenizer, tokenizer_path, transformer.config.vocab_size);
 
+    draw_llama();
+
+#if CONFIG_LLM_EVAL
+    // Correctness eval: teacher-forced perplexity over a fixed reference
+    // sentence, checked against eval/golden.json by CI. Keep this string
+    // byte-identical to the "sentence" field in eval/golden.json.
+    (void)temperature;
+    (void)topp;
+    (void)rng_seed;
+    (void)steps;
+    (void)prompt;
+    char *eval_text = "One day, a clever fox found a shiny key under the old oak tree.";
+    float ppl = eval_perplexity(&transformer, &tokenizer, eval_text);
+    char pbuf[32];
+    snprintf(pbuf, sizeof(pbuf), "ppl %.3f", ppl);
+    write_display(pbuf);
+    // Print on a loop (parity with the generate loop) so the benchmark
+    // harness reliably captures the line regardless of when it attaches.
+    while (1)
+    {
+        printf("perplexity: %.6f\n", ppl);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+#else
     // build the Sampler
     Sampler sampler;
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
     // run!
-    draw_llama();
 #if CONFIG_LLM_GENERATE_LOOP
     while (1)
     {
@@ -182,5 +205,6 @@ void app_main(void)
     }
 #else
     generate(&transformer, &tokenizer, &sampler, prompt, steps, &generate_complete_cb);
+#endif
 #endif
 }

@@ -1124,3 +1124,38 @@ void read_stdin(const char *guide, char *buffer, size_t bufsize)
         }
     }
 }
+
+// ----------------------------------------------------------------------------
+// correctness eval: teacher-forced perplexity over a fixed reference sentence.
+// Mirrors eval/ppl.c on the host exactly (same encode/forward/softmax, double
+// NLL accumulation) so the on-device value can be checked against the committed
+// golden value. Lower perplexity = the model assigned higher probability to the
+// real next tokens. See eval/README.md.
+float eval_perplexity(Transformer *t, Tokenizer *tok, char *text)
+{
+    int vocab_size = t->config.vocab_size;
+    int *tokens = malloc((strlen(text) + 3) * sizeof(int));
+    if (tokens == NULL)
+    {
+        ESP_LOGE(TAG, "eval_perplexity: out of memory");
+        return -1.0f;
+    }
+    int n = 0;
+    encode(tok, text, /*bos*/ 1, /*eos*/ 0, tokens, &n);
+    if (n < 2)
+    {
+        free(tokens);
+        return -1.0f;
+    }
+
+    double nll = 0.0;
+    for (int pos = 0; pos < n - 1; pos++)
+    {
+        v4sf *logits = forward(t, tokens[pos], pos);
+        softmax(logits, vocab_size);
+        float p = logits[tokens[pos + 1]];
+        nll += -log((double)p);
+    }
+    free(tokens);
+    return (float)exp(nll / (n - 1));
+}

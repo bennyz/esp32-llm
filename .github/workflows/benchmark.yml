@@ -44,7 +44,7 @@ jobs:
           echo "build failed after 3 attempts"
           exit 1
 
-      - name: Merge flash image
+      - name: Merge benchmark flash image
         shell: bash
         run: |
           . "$IDF_PATH/export.sh"
@@ -54,10 +54,26 @@ jobs:
           esptool.py --chip esp32s3 merge_bin -o merged.bin @merge_args
           ls -l merged.bin
 
+      - name: Build eval firmware (CONFIG_LLM_EVAL=y)
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          # Same sources, correctness-eval build flavor. Dependencies are
+          # already resolved from the benchmark build, so a single pass is
+          # enough (no retry wrapper needed).
+          echo "CONFIG_LLM_EVAL=y" >> sdkconfig
+          idf.py build
+          cd build
+          sed 's/--flash_size detect/--flash_size keep/' flash_args > merge_args
+          esptool.py --chip esp32s3 merge_bin -o eval.bin @merge_args
+          ls -l eval.bin
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: build/merged.bin
+          path: |
+            build/merged.bin
+            build/eval.bin
           if-no-files-found: error
 
   benchmark:
@@ -80,6 +96,15 @@ jobs:
             quay.io/jumpstarter-dev/jumpstarter:latest \
             jmp shell --client-config /tmp/ci.yaml --selector board=esp32 -- \
             python scripts/benchmark.py firmware/merged.bin --runs 3 --out result.json
+
+      - name: Correctness eval — perplexity vs golden (via jumpstarter lease)
+        run: |
+          podman run --rm --network host --userns keep-id -e HOME=/tmp \
+            -v "$HOME/.config/jumpstarter/ci-client.yaml:/tmp/ci.yaml:ro,z" \
+            -v "$PWD:/workspace:z" -w /workspace \
+            quay.io/jumpstarter-dev/jumpstarter:latest \
+            jmp shell --client-config /tmp/ci.yaml --selector board=esp32 -- \
+            python scripts/eval.py firmware/eval.bin --golden eval/golden.json --out eval_result.json
 
       - name: Fetch baseline
         run: |
