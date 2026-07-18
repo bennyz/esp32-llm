@@ -72,12 +72,9 @@ def main() -> int:
         f"chip: `{result['chip']}`",
     ]
 
-    summary = "\n".join(lines) + "\n"
-    print(summary)
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a") as f:
-            f.write(summary)
+    # The step summary / PR comment is composed by scripts/pr_comment.py from
+    # the JSON artifacts; here we only print (for the run log) and gate.
+    print("\n".join(lines) + "\n")
 
     return 1 if failed else 0
 

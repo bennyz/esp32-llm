@@ -14,6 +14,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   build:
@@ -114,6 +115,14 @@ jobs:
 
       - name: Compare against baseline
         run: python3 scripts/compare_benchmark.py result.json --baseline baseline.json
+
+      - name: Report results (step summary + PR comment)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/pr_comment.py \
+            --result result.json --eval eval_result.json --baseline baseline.json
 
       - name: Update baseline (main only)
         if: github.ref == 'refs/heads/main'

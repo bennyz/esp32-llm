@@ -16,7 +16,6 @@ model numerics — even if tok/s looks fine.
 
 import argparse
 import json
-import os
 import re
 import sys
 import time
@@ -83,21 +82,8 @@ def main() -> int:
         with open(args.out, "w") as f:
             json.dump(report, f)
 
-    verdict = "✅ within tolerance" if passed else "❌ **drifted** — model numerics changed"
-    summary = (
-        "## ESP32 correctness eval\n\n"
-        f"teacher-forced perplexity on: _{golden.get('sentence', '')}_\n\n"
-        "| metric | value |\n|--------|-------|\n"
-        f"| device perplexity | {device_ppl:.4f} |\n"
-        f"| golden perplexity | {golden_ppl:.4f} |\n"
-        f"| drift | {drift:.2%} (tolerance {tolerance:.0%}) |\n\n"
-        f"{verdict}\n"
-    )
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with open(summary_path, "a") as f:
-            f.write(summary)
-
+    # The step summary / PR comment is composed on the host by
+    # scripts/pr_comment.py from eval_result.json; this step just gates.
     print(
         f"\ndevice perplexity {device_ppl:.4f} vs golden {golden_ppl:.4f} "
         f"→ drift {drift:.2%} (tolerance {tolerance:.0%})",
