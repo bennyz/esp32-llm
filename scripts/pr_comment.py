@@ -48,7 +48,9 @@ def _api(method, url, token, body=None):
 
 
 def build_report(result, eval_result, baseline, threshold):
-    sha = os.environ.get("GITHUB_SHA", "")
+    # On pull_request, GITHUB_SHA is the temporary merge commit; prefer the
+    # PR head sha for display when the workflow provides it.
+    sha = os.environ.get("HEAD_SHA") or os.environ.get("GITHUB_SHA", "")
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = os.environ.get("GITHUB_RUN_ID", "")
@@ -176,14 +178,17 @@ def main() -> int:
     token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     sha = os.environ.get("GITHUB_SHA")
-    if not (token and repo and sha):
-        print("no GITHUB_TOKEN/REPOSITORY/SHA — skipping PR comment", file=sys.stderr)
+    if not (token and repo):
+        print("no GITHUB_TOKEN/REPOSITORY — skipping PR comment", file=sys.stderr)
         return 0
 
     try:
-        pr = find_pr(token, repo, sha)
+        # pull_request runs know the PR number directly; push-to-main runs
+        # look it up from the commit (and usually find none → summary only).
+        pr_env = os.environ.get("PR_NUMBER")
+        pr = int(pr_env) if pr_env else (find_pr(token, repo, sha) if sha else None)
         if pr is None:
-            print("no open PR for this commit — skipping PR comment", file=sys.stderr)
+            print("no PR for this run — skipping PR comment (step summary written)", file=sys.stderr)
             return 0
         upsert_comment(token, repo, pr, body)
     except urllib.error.HTTPError as e:

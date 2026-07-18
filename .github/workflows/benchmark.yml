@@ -1,11 +1,15 @@
 name: benchmark
 
-# Note: no pull_request trigger on purpose — the benchmark job runs on a
-# self-hosted runner attached to real hardware, so only trusted pushes to
-# this repository may trigger it.
+# Runs on pull requests, and on pushes to main (the latter refreshes the
+# stored baseline after a change lands). The benchmark job drives a
+# self-hosted runner attached to real hardware, so the jobs are guarded to
+# skip pull requests coming from forks — only PRs whose branch lives in this
+# repository ever reach the board. Fork PRs trigger nothing on hardware.
 on:
+  pull_request:
+    branches: [main]
   push:
-    branches: ["**"]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -18,6 +22,12 @@ permissions:
 
 jobs:
   build:
+    # Skip fork PRs: only run for pushes, manual dispatch, or PRs whose head
+    # branch is in this repository. benchmark (needs: build) is skipped with
+    # it, so fork code never reaches the self-hosted board.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v5.3
@@ -120,6 +130,10 @@ jobs:
         if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # On pull_request the PR number is known directly; on push to main
+          # there is none and pr_comment.py just writes the step summary.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 scripts/pr_comment.py \
             --result result.json --eval eval_result.json --baseline baseline.json

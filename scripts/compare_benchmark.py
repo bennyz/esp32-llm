@@ -44,7 +44,7 @@ def main() -> int:
     failed = False
     warnings = []
     for key in ("mean", "min", "max"):
-        base_val = f"{baseline[key]:.2f}" if baseline else "—"
+        base_val = f"{baseline[key]:.2f}" if baseline else "-"
         lines.append(f"| {key} tok/s | {result[key]:.2f} | {base_val} |")
 
     if baseline:
@@ -55,11 +55,11 @@ def main() -> int:
             lines.append(f"❌ **regression**: mean tok/s dropped more than {args.threshold:.0%}")
         if baseline.get("output_sha256") and baseline["output_sha256"] != result.get("output_sha256"):
             warnings.append(
-                "⚠️ generated text changed vs baseline (fixed seed) — "
+                "⚠️ generated text changed vs baseline "
                 "a code change altered the model numerics"
             )
     else:
-        lines += ["", "_no baseline found — this run becomes the baseline on main_"]
+        lines += ["", "_no baseline found - this run becomes the baseline on main_"]
 
     if result.get("quality_problems"):
         failed = True
