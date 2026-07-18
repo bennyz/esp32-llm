@@ -81,6 +81,11 @@ jobs:
     needs: build
     runs-on: [self-hosted, esp32]
     timeout-minutes: 20
+    # Gate the hardware job behind the "hardware" environment (required
+    # reviewer). The run pauses here until a reviewer approves, so the
+    # physical board is only ever driven by an explicitly-approved run.
+    # The cloud-only build job above is intentionally left ungated.
+    environment: hardware
     steps:
       - uses: actions/checkout@v4
 
