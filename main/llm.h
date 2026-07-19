@@ -113,6 +113,7 @@ void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size);
 void build_sampler(Sampler* sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed);
 void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps, generated_complete_cb cb_done);
 float eval_perplexity(Transformer *t, Tokenizer *tok, char *text);
+void read_stdin(const char *guide, char *buffer, size_t bufsize);
 void free_sampler(Sampler* sampler);
 void free_transformer(Transformer* t);
 void free_tokenizer(Tokenizer* t);
