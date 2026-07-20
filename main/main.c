@@ -13,6 +13,11 @@
 #include <driver/i2c.h>
 #include <string.h>
 #include "llama.h"
+#if CONFIG_LLM_INTERACTIVE
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#include "esp_vfs_dev.h"
+#endif
 
 static const char *TAG = "MAIN";
 u8g2_t u8g2;
@@ -138,6 +143,29 @@ void draw_llama(void)
 #endif
 }
 
+#if CONFIG_LLM_INTERACTIVE
+/**
+ * @brief Enable blocking line reads from the console.
+ *
+ * This board's console is USB-Serial-JTAG (see CONFIG_ESP_CONSOLE_*), so
+ * without the driver installed stdin returns EOF immediately and fgets never
+ * blocks for input. Installing it (and normalizing CR/LF) lets read_stdin()
+ * wait for a full typed line.
+ */
+static void console_init_input(void)
+{
+    setvbuf(stdin, NULL, _IONBF, 0);
+    fflush(stdout);
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
+    usb_serial_jtag_vfs_use_driver();
+    // Treat a bare CR (what most terminals send on Enter) as a line break; a
+    // bare LF already terminates a line, so both styles work.
+    usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+    usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+}
+#endif
+
 void app_main(void)
 {
     init_display();
@@ -147,7 +175,7 @@ void app_main(void)
     // default parameters
     char *checkpoint_path = "/data/stories260K.bin"; // e.g. out/model.bin
     char *tokenizer_path = "/data/tok512.bin";
-    float temperature = 1.0f;        // 0.0 = greedy deterministic. 1.0 = original. don't set higher
+    float temperature = CONFIG_LLM_TEMPERATURE_X10 / 10.0f; // 0.0 = greedy. 1.0 = original. higher = more varied, less coherent
     float topp = 0.9f;               // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
     int steps = 256;                 // number of steps to run for
     char *prompt = NULL;             // prompt string
@@ -197,7 +225,23 @@ void app_main(void)
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
     // run!
-#if CONFIG_LLM_GENERATE_LOOP
+#if CONFIG_LLM_INTERACTIVE
+    // Read a prompt from the console each round and continue it. Variety now
+    // comes from the prompt, not the RNG — with an empty prompt this tiny,
+    // heavily-peaked model collapses onto one canonical story every time.
+    console_init_input();
+    char prompt_buf[256];
+    printf("\nInteractive mode: type a prompt and press Enter (temperature %.1f).\n", temperature);
+    while (1)
+    {
+        read_stdin("\n> ", prompt_buf, sizeof(prompt_buf));
+        if (prompt_buf[0] == '\0')
+        {
+            continue; // empty line: nothing to seed with, ask again
+        }
+        generate(&transformer, &tokenizer, &sampler, prompt_buf, steps, &generate_complete_cb);
+    }
+#elif CONFIG_LLM_GENERATE_LOOP
     while (1)
     {
         generate(&transformer, &tokenizer, &sampler, prompt, steps, &generate_complete_cb);

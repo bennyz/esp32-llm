@@ -34,6 +34,26 @@ menu "Example Configuration"
             value in eval/golden.json to catch code changes that corrupt the
             model numerics (e.g. a fast-but-wrong SIMD/alignment change).
 
+    config LLM_INTERACTIVE
+        bool "Interactive prompt mode (read prompts from the console)"
+        default n
+        help
+            Instead of generating from a fixed empty prompt, wait for a line
+            of text on the console and continue it. Each prompt starts a new
+            generation, so the output varies with what you type. Keep this
+            off for the CI benchmark/eval builds, which expect the automated
+            generate loop. Ignored when LLM_EVAL is set.
+
+    config LLM_TEMPERATURE_X10
+        int "Sampling temperature x10 (10 = 1.0)"
+        default 10
+        range 0 20
+        help
+            Sampling temperature multiplied by 10 (Kconfig has no float type).
+            0 = greedy/deterministic, 10 = 1.0 (original), higher flattens the
+            distribution for more varied but less coherent text. Most useful
+            with LLM_INTERACTIVE to dial in how adventurous the model is.
+
     menu "I2C Master"
         config I2C_MASTER_SCL
             int "SCL GPIO Num"
