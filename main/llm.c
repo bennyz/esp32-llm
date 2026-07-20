@@ -271,10 +271,7 @@ void rmsnorm(v4sf *o, v4sf *x, v4sf *weight, int size)
 {
     // calculate sum of squares
     v4sf ss = 0.0f;
-    for (int j = 0; j < size; j++)
-    {
-        ss += x[j] * x[j];
-    }
+    dsps_dotprod_f32_aes3(x, x, &ss, size);
     ss /= size;
     ss += 1e-5f;
     ss = 1.0f / sqrtf(ss);
@@ -349,6 +346,7 @@ void forward_task(void *params)
         {
             //   ESP_LOGI(TAG, "Started Task %s", tName);
             int h;
+            v4sf inv_sqrt_head_size = 1.0f / sqrtf(t_params->head_size);
             // #pragma omp parallel for private(h)
             for (h = t_params->start; h < t_params->end; h++)
             {
@@ -363,13 +361,9 @@ void forward_task(void *params)
                     v4sf *k = t_params->s->key_cache + t_params->loff + t * t_params->kv_dim + (h / t_params->kv_mul) * t_params->head_size;
                     // calculate the attention score as the dot product of q and k
                     v4sf score = 0.0f;
-                    for (int i = 0; i < t_params->head_size; i++)
-                    {
-                        score += q[i] * k[i];
-                    }
-                    score /= sqrtf(t_params->head_size);
+                    dsps_dotprod_f32_aes3(q, k, &score, t_params->head_size);
                     // save the score to the attention buffer
-                    att[t] = score;
+                    att[t] = score * inv_sqrt_head_size;
                 }
 
                 // softmax the scores to get attention weights, from 0..pos inclusively
@@ -445,6 +439,20 @@ v4sf *forward(Transformer *transformer, int token, int pos)
     ESP_LOGD(TAG, "Content row: %f", *content_row);
     memcpy(x, content_row, dim * sizeof(*x));
 
+    // RoPE cos/sin depend only on pos and (i % head_size), not on the layer,
+    // so there are just head_size/2 distinct pairs per token. Computing them
+    // here once replaces n_layers * dim/2 powf/cosf/sinf calls per token.
+    float rope_fcr[head_size / 2];
+    float rope_fci[head_size / 2];
+    for (int j = 0; j < head_size / 2; j++)
+    {
+        int head_dim = 2 * j;
+        v4sf freq = 1.0f / powf(10000.0f, head_dim / (v4sf)head_size);
+        v4sf val = pos * freq;
+        rope_fcr[j] = cosf(val);
+        rope_fci[j] = sinf(val);
+    }
+
     // forward all the layers
     for (unsigned long long l = 0; l < p->n_layers; l++)
     {
@@ -465,11 +473,8 @@ v4sf *forward(Transformer *transformer, int token, int pos)
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
         for (int i = 0; i < dim; i += 2)
         {
-            int head_dim = i % head_size;
-            v4sf freq = 1.0f / powf(10000.0f, head_dim / (v4sf)head_size);
-            v4sf val = pos * freq;
-            v4sf fcr = cosf(val);
-            v4sf fci = sinf(val);
+            v4sf fcr = rope_fcr[(i % head_size) / 2];
+            v4sf fci = rope_fci[(i % head_size) / 2];
             int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
             for (int v = 0; v < rotn; v++)
             {
@@ -500,6 +505,7 @@ v4sf *forward(Transformer *transformer, int token, int pos)
 
         // multihead attention. iterate over all heads
         int h;
+        v4sf inv_sqrt_head_size = 1.0f / sqrtf(head_size);
         // #pragma omp parallel for private(h)
         for (h = 0; h < (p->n_heads / 2); h++)
         {
@@ -514,13 +520,9 @@ v4sf *forward(Transformer *transformer, int token, int pos)
                 v4sf *k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
                 // calculate the attention score as the dot product of q and k
                 v4sf score = 0.0f;
-                for (int i = 0; i < head_size; i++)
-                {
-                    score += q[i] * k[i];
-                }
-                score /= sqrtf(head_size);
+                dsps_dotprod_f32_aes3(q, k, &score, head_size);
                 // save the score to the attention buffer
-                att[t] = score;
+                att[t] = score * inv_sqrt_head_size;
             }
 
             // softmax the scores to get attention weights, from 0..pos inclusively
