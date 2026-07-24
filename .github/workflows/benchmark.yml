@@ -160,7 +160,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 scripts/pr_comment.py \
-            --result result.json --eval eval_result.json --baseline baseline.json
+            --result result.json --eval eval_result.json \
+            --eval-q8 eval_q8_result.json --baseline baseline.json
 
       - name: Update baseline (main only)
         if: github.ref == 'refs/heads/main'

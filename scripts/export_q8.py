@@ -11,7 +11,7 @@ Format reference: https://github.com/karpathy/llama2.c/blob/master/export.py
                   (version2_export) and runq.c (read_checkpoint).
 
 Why not torch: we already have an exported fp32 .bin, so we work directly on
-the raw floats with numpy — no PyTorch, no model class needed.
+the raw floats with numpy - no PyTorch, no model class needed.
 
 Usage:
     python scripts/export_q8.py data/stories260K.bin data/stories260K_q8.bin

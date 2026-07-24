@@ -11,7 +11,7 @@ The eval firmware computes teacher-forced perplexity over a fixed reference
 sentence and prints `perplexity: <float>` in a loop. We compare the device
 value against the golden value (computed on the host, see eval/README.md).
 A drift larger than the golden's tolerance means a code change altered the
-model numerics — even if tok/s looks fine.
+model numerics - even if tok/s looks fine.
 """
 
 import argparse
