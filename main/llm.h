@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -17,6 +18,14 @@
 #include "freertos/event_groups.h"
 
 typedef float v4sf __attribute__((aligned(16)));
+
+// A group-wise int8 quantized tensor (Q8_0): `q` holds the int8 values, `s`
+// holds one fp32 scale per group of GS values. Used only for quantized
+// checkpoints (magic "ak42", version 2); the fp32 path leaves these NULL.
+typedef struct {
+    int8_t *q; // quantized values
+    float *s;  // scaling factors, one per group
+} QuantizedTensor;
 
 typedef struct {
     float prob;
@@ -74,6 +83,14 @@ typedef struct {
     v4sf* rms_final_weight; // (dim,)
     // (optional) classifier weights for the logits, on the last layer
     v4sf* wcls;
+
+    // --- quantized (Q8_0) weights, used only when Transformer.quantized != 0 ---
+    // The fp32 pointers above are unused in that mode, except
+    // token_embedding_table which is populated with the dequantized table.
+    QuantizedTensor *q_tokens; // (vocab_size, dim)
+    QuantizedTensor *qwq, *qwk, *qwv, *qwo; // (layer, ...)
+    QuantizedTensor *qw1, *qw2, *qw3;       // (layer, ...)
+    QuantizedTensor *qwcls;                 // shared with q_tokens if tied
 } TransformerWeights;
 
 typedef struct {
@@ -88,6 +105,9 @@ typedef struct {
     v4sf *v; // value (dim,)
     v4sf *att; // buffer for scores/attention values (n_heads, seq_len)
     v4sf *logits; // output logits
+    // quantized activation buffers (Q8_0 path only)
+    QuantizedTensor xq; // quantized x (dim,)
+    QuantizedTensor hq; // quantized hb (hidden_dim,)
     // kv cache
     v4sf* key_cache;   // (layer, seq_len, dim)
     v4sf* value_cache; // (layer, seq_len, dim)
@@ -102,6 +122,8 @@ typedef struct {
     int fd; // file descriptor for memory mapping
     v4sf* data; // memory mapped data pointer
     size_t file_size; // size of the checkpoint file in bytes
+    int quantized; // 1 if the checkpoint is Q8_0 (magic "ak42", version 2)
+    int group_size; // quantization group size (GS), quantized checkpoints only
 } Transformer;
 
 

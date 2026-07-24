@@ -81,6 +81,10 @@ static const char *TAG = "LLM";
 TaskHandle_t handle_forward_task = NULL;
 TaskHandle_t matmul_task_2 = NULL;
 
+// Quantization group size for Q8_0 checkpoints. 0 means the loaded model is
+// the legacy fp32 format (the quantized code paths are then never entered).
+static int GS = 0;
+
 ForwardTaskParams *forward_params = NULL;
 MatMulTaskParams *matmul_params = NULL;
 
@@ -89,6 +93,8 @@ SemaphoreHandle_t semaForwardDataReady;
 
 void matmul_task(void *params);
 void forward_task(void *params);
+void quantize(QuantizedTensor *qx, v4sf *x, int n);
+void dequantize(QuantizedTensor *qx, v4sf *x, int n);
 
 void custom_munmap(void *ptr)
 {
@@ -123,6 +129,19 @@ void malloc_run_state(RunState *s, Config *p)
     {
         fprintf(stderr, "malloc failed!\n");
         exit(EXIT_FAILURE);
+    }
+    // quantized activation buffers, only needed for a Q8_0 model
+    if (GS > 0)
+    {
+        s->xq.q = aligned_calloc16(p->dim, sizeof(int8_t));
+        s->xq.s = aligned_calloc16(p->dim / GS, sizeof(float));
+        s->hq.q = aligned_calloc16(p->hidden_dim, sizeof(int8_t));
+        s->hq.s = aligned_calloc16(p->hidden_dim / GS, sizeof(float));
+        if (!s->xq.q || !s->xq.s || !s->hq.q || !s->hq.s)
+        {
+            fprintf(stderr, "malloc failed!\n");
+            exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -224,10 +243,146 @@ void read_checkpoint(char *checkpoint, Config *config, TransformerWeights *weigh
     ESP_LOGI(TAG, "Successfully read checkpoint");
 }
 
+// ----------------------------------------------------------------------------
+// Q8_0 checkpoint loading (magic "ak42", version 2). Layout mirrors runq.c:
+// a 256-byte header, then fp32 rmsnorm weights, then the quantized tensors
+// (each an int8 block followed by fp32 group scales). On the ESP32 we read the
+// whole file into a RAM buffer and point into it (no mmap over SPIFFS).
+
+// initialize `n` quantized tensors (each `size_each` int8 values + scales),
+// carving them out of the buffer at *ptr and advancing *ptr past them.
+static QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each)
+{
+    void *p = *ptr;
+    QuantizedTensor *res = malloc(n * sizeof(QuantizedTensor));
+    for (int i = 0; i < n; i++)
+    {
+        res[i].q = (int8_t *)p;
+        p = (int8_t *)p + size_each;
+        res[i].s = (float *)p;
+        p = (float *)p + size_each / GS;
+    }
+    *ptr = p;
+    return res;
+}
+
+static void memory_map_weights_q8(TransformerWeights *w, Config *p, void *ptr, uint8_t shared_classifier)
+{
+    int head_size = p->dim / p->n_heads;
+    unsigned long long n_layers = p->n_layers;
+    // fp32 rmsnorm (1D) weights come first
+    float *fptr = (float *)ptr;
+    w->rms_att_weight = fptr;
+    fptr += n_layers * p->dim;
+    w->rms_ffn_weight = fptr;
+    fptr += n_layers * p->dim;
+    w->rms_final_weight = fptr;
+    fptr += p->dim;
+
+    // then the quantized weights
+    ptr = (void *)fptr;
+    w->q_tokens = init_quantized_tensors(&ptr, 1, p->vocab_size * p->dim);
+    // dequantize the token embedding table into fp32 (used by embedding lookup)
+    w->token_embedding_table = aligned_calloc16(p->vocab_size * p->dim, sizeof(v4sf));
+    dequantize(w->q_tokens, w->token_embedding_table, p->vocab_size * p->dim);
+
+    w->qwq = init_quantized_tensors(&ptr, n_layers, p->dim * (p->n_heads * head_size));
+    w->qwk = init_quantized_tensors(&ptr, n_layers, p->dim * (p->n_kv_heads * head_size));
+    w->qwv = init_quantized_tensors(&ptr, n_layers, p->dim * (p->n_kv_heads * head_size));
+    w->qwo = init_quantized_tensors(&ptr, n_layers, (p->n_heads * head_size) * p->dim);
+    w->qw1 = init_quantized_tensors(&ptr, n_layers, p->dim * p->hidden_dim);
+    w->qw2 = init_quantized_tensors(&ptr, n_layers, p->hidden_dim * p->dim);
+    w->qw3 = init_quantized_tensors(&ptr, n_layers, p->dim * p->hidden_dim);
+    w->qwcls = shared_classifier ? w->q_tokens : init_quantized_tensors(&ptr, 1, p->dim * p->vocab_size);
+}
+
+static void read_checkpoint_q8(char *checkpoint, Config *config, TransformerWeights *weights,
+                               v4sf **data, size_t *file_size, int *group_size)
+{
+    FILE *file = fopen(checkpoint, "rb");
+    if (!file)
+    {
+        ESP_LOGE(TAG, "Couldn't open file %s", checkpoint);
+        exit(EXIT_FAILURE);
+    }
+    fseek(file, 0, SEEK_END);
+    *file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    ESP_LOGI(TAG, "Q8_0 checkpoint, file size: %zu bytes", *file_size);
+    ESP_LOGI(TAG, "Free ram available: %lu", esp_get_free_heap_size());
+
+    // read the whole file into a 16-byte aligned RAM buffer (header is 256
+    // bytes so the weight region stays aligned too). Never freed.
+    void *buffer = heap_caps_aligned_alloc(16, *file_size, MALLOC_CAP_DEFAULT);
+    if (buffer == NULL)
+    {
+        ESP_LOGE(TAG, "Malloc operation failed");
+        exit(EXIT_FAILURE);
+    }
+    if (fread(buffer, 1, *file_size, file) != *file_size)
+    {
+        ESP_LOGE(TAG, "Failed to read checkpoint into memory");
+        exit(EXIT_FAILURE);
+    }
+    fclose(file);
+    *data = (v4sf *)buffer;
+
+    // parse the 256-byte header: magic(4) version(4) config(28) shared(1) gs(4)
+    char *h = (char *)buffer;
+    int version;
+    memcpy(&version, h + 4, sizeof(int));
+    if (version != 2)
+    {
+        ESP_LOGE(TAG, "Bad Q8_0 version %d, need 2", version);
+        exit(EXIT_FAILURE);
+    }
+    memcpy(config, h + 8, sizeof(Config));
+    uint8_t shared_classifier = (uint8_t)h[8 + sizeof(Config)];
+    memcpy(group_size, h + 8 + sizeof(Config) + 1, sizeof(int));
+    GS = *group_size;
+    ESP_LOGI(TAG, "Vocab size %d, group size %d, shared_classifier %d",
+             config->vocab_size, GS, shared_classifier);
+
+    void *weights_ptr = (char *)buffer + 256; // skip the header
+    memory_map_weights_q8(weights, config, weights_ptr, shared_classifier);
+    ESP_LOGI(TAG, "Successfully read Q8_0 checkpoint");
+    ESP_LOGI(TAG, "Free ram available: %lu", esp_get_free_heap_size());
+}
+
+// peek the first 4 bytes to detect the Q8_0 magic ("ak42") without committing
+// to a full load path.
+static uint32_t peek_magic(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        ESP_LOGE(TAG, "Couldn't open file %s", path);
+        exit(EXIT_FAILURE);
+    }
+    uint32_t magic = 0;
+    if (fread(&magic, sizeof(magic), 1, f) != 1)
+    {
+        magic = 0;
+    }
+    fclose(f);
+    return magic;
+}
+
 void build_transformer(Transformer *t, char *checkpoint_path)
 {
-    // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
+    // read in the Config and the Weights from the checkpoint. A "ak42" magic
+    // selects the Q8_0 quantized loader; anything else is legacy fp32.
+    if (peek_magic(checkpoint_path) == 0x616b3432)
+    {
+        t->quantized = 1;
+        t->fd = -1;
+        read_checkpoint_q8(checkpoint_path, &t->config, &t->weights, &t->data, &t->file_size, &t->group_size);
+    }
+    else
+    {
+        t->quantized = 0;
+        read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
+    }
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
     ESP_LOGI(TAG, "Transformer successfully built");
@@ -307,6 +462,72 @@ void softmax(v4sf *x, int size)
     for (int i = 0; i < size; i++)
     {
         x[i] /= sum;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Q8_0 quantization: group-wise symmetric int8. Ported from karpathy's runq.c
+// (kept byte- and math-identical so eval/ppl_q.c on the host is a valid golden
+// reference for the on-device numerics). Scalar for now; the SIMD/dual-core
+// int8 kernel is a later optimization pass.
+
+void dequantize(QuantizedTensor *qx, v4sf *x, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        x[i] = qx->q[i] * qx->s[i / GS];
+    }
+}
+
+void quantize(QuantizedTensor *qx, v4sf *x, int n)
+{
+    int num_groups = n / GS;
+    float Q_MAX = 127.0f;
+
+    for (int group = 0; group < num_groups; group++)
+    {
+        // find the max absolute value in the current group
+        float wmax = 0.0f;
+        for (int i = 0; i < GS; i++)
+        {
+            float val = fabsf(x[group * GS + i]);
+            if (val > wmax)
+            {
+                wmax = val;
+            }
+        }
+        // calculate and write the scaling factor
+        float scale = wmax / Q_MAX;
+        qx->s[group] = scale;
+        // calculate and write the quantized values
+        for (int i = 0; i < GS; i++)
+        {
+            float quant_value = x[group * GS + i] / scale; // scale
+            int8_t quantized = (int8_t)roundf(quant_value); // round and clamp
+            qx->q[group * GS + i] = quantized;
+        }
+    }
+}
+
+// W (d,n) @ x (n,) -> xout (d,), all int8 with per-group fp32 scales.
+void matmul_q8(v4sf *xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d)
+{
+    for (int i = 0; i < d; i++)
+    {
+        float val = 0.0f;
+        int32_t ival = 0;
+        int in = i * n;
+        // do the matmul in groups of GS
+        for (int j = 0; j <= n - GS; j += GS)
+        {
+            for (int k = 0; k < GS; k++)
+            {
+                ival += ((int32_t)x->q[j + k]) * ((int32_t)w->q[in + j + k]);
+            }
+            val += ((float)ival) * w->s[(in + j) / GS] * x->s[j / GS];
+            ival = 0;
+        }
+        xout[i] = val;
     }
 }
 
@@ -425,8 +646,132 @@ void matmul(v4sf *xout, v4sf *x, v4sf *w, int n, int d)
     //   ESP_LOGI(TAG, "Completed MatMul tasks");
 }
 
+// Q8_0 forward pass. Single-core scalar port of runq.c's forward(); mirrors the
+// fp32 forward() structure (matmuls write k/v straight into the kv cache) but
+// quantizes the activation before every matmul and uses int8 matmul_q8.
+static v4sf *forward_q8(Transformer *transformer, int token, int pos)
+{
+    Config *p = &transformer->config;
+    TransformerWeights *w = &transformer->weights;
+    RunState *s = &transformer->state;
+    v4sf *x = s->x;
+    int dim = p->dim;
+    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    int kv_mul = p->n_heads / p->n_kv_heads;
+    int hidden_dim = p->hidden_dim;
+    int head_size = dim / p->n_heads;
+
+    // copy the (dequantized) token embedding into x
+    memcpy(x, w->token_embedding_table + token * dim, dim * sizeof(*x));
+
+    for (unsigned long long l = 0; l < p->n_layers; l++)
+    {
+        // attention rmsnorm
+        rmsnorm(s->xb, x, w->rms_att_weight + l * dim, dim);
+
+        // key/value written straight into the kv cache for this position
+        int loff = l * p->seq_len * kv_dim;
+        v4sf *krow = s->key_cache + loff + pos * kv_dim;
+        v4sf *vrow = s->value_cache + loff + pos * kv_dim;
+
+        // qkv matmuls (quantize the shared input activation once)
+        quantize(&s->xq, s->xb, dim);
+        matmul_q8(s->q, &s->xq, w->qwq + l, dim, dim);
+        matmul_q8(krow, &s->xq, w->qwk + l, dim, kv_dim);
+        matmul_q8(vrow, &s->xq, w->qwv + l, dim, kv_dim);
+
+        // RoPE: rotate q (all heads) and k (kv heads) in place
+        for (int i = 0; i < dim; i += 2)
+        {
+            int head_dim = i % head_size;
+            v4sf freq = 1.0f / powf(10000.0f, head_dim / (v4sf)head_size);
+            v4sf val = pos * freq;
+            v4sf fcr = cosf(val);
+            v4sf fci = sinf(val);
+            int rotn = i < kv_dim ? 2 : 1;
+            for (int vv = 0; vv < rotn; vv++)
+            {
+                v4sf *vec = vv == 0 ? s->q : krow;
+                v4sf v0 = vec[i];
+                v4sf v1 = vec[i + 1];
+                vec[i] = v0 * fcr - v1 * fci;
+                vec[i + 1] = v0 * fci + v1 * fcr;
+            }
+        }
+
+        // multihead attention
+        for (int h = 0; h < p->n_heads; h++)
+        {
+            v4sf *q = s->q + h * head_size;
+            v4sf *att = s->att + h * p->seq_len;
+            for (int t = 0; t <= pos; t++)
+            {
+                v4sf *k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                v4sf score = 0.0f;
+                for (int i = 0; i < head_size; i++)
+                {
+                    score += q[i] * k[i];
+                }
+                score /= sqrtf(head_size);
+                att[t] = score;
+            }
+            softmax(att, pos + 1);
+            v4sf *xb = s->xb + h * head_size;
+            memset(xb, 0, head_size * sizeof(v4sf));
+            for (int t = 0; t <= pos; t++)
+            {
+                v4sf *vc = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                v4sf a = att[t];
+                for (int i = 0; i < head_size; i++)
+                {
+                    xb[i] += a * vc[i];
+                }
+            }
+        }
+
+        // attention output projection
+        quantize(&s->xq, s->xb, dim);
+        matmul_q8(s->xb2, &s->xq, w->qwo + l, dim, dim);
+        for (int i = 0; i < dim; i++)
+        {
+            x[i] += s->xb2[i];
+        }
+
+        // ffn rmsnorm
+        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
+
+        // FFN: w2(silu(w1(x)) * w3(x))
+        quantize(&s->xq, s->xb, dim);
+        matmul_q8(s->hb, &s->xq, w->qw1 + l, dim, hidden_dim);
+        matmul_q8(s->hb2, &s->xq, w->qw3 + l, dim, hidden_dim);
+        for (int i = 0; i < hidden_dim; i++)
+        {
+            v4sf val = s->hb[i];
+            val *= (1.0f / (1.0f + expf(-val)));
+            val *= s->hb2[i];
+            s->hb[i] = val;
+        }
+        quantize(&s->hq, s->hb, hidden_dim);
+        matmul_q8(s->xb, &s->hq, w->qw2 + l, hidden_dim, dim);
+        for (int i = 0; i < dim; i++)
+        {
+            x[i] += s->xb[i];
+        }
+    }
+
+    // final rmsnorm + classifier
+    rmsnorm(x, x, w->rms_final_weight, dim);
+    quantize(&s->xq, x, dim);
+    matmul_q8(s->logits, &s->xq, w->qwcls, dim, p->vocab_size);
+    return s->logits;
+}
+
 v4sf *forward(Transformer *transformer, int token, int pos)
 {
+    if (transformer->quantized)
+    {
+        return forward_q8(transformer, token, pos);
+    }
     ESP_LOGD(TAG, "ram available: %lu", esp_get_free_heap_size());
 
     // a few convenience variables

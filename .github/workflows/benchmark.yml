@@ -79,12 +79,27 @@ jobs:
           esptool.py --chip esp32s3 merge_bin -o eval.bin @merge_args
           ls -l eval.bin
 
+      - name: Build q8 eval firmware (CONFIG_LLM_MODEL_Q8=y)
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          # Same eval flavor (CONFIG_LLM_EVAL=y is already in sdkconfig from the
+          # previous step) but pointed at the Q8_0 quantized checkpoint, to
+          # verify the int8 forward path on real hardware.
+          echo "CONFIG_LLM_MODEL_Q8=y" >> sdkconfig
+          idf.py build
+          cd build
+          sed 's/--flash_size detect/--flash_size keep/' flash_args > merge_args
+          esptool.py --chip esp32s3 merge_bin -o eval_q8.bin @merge_args
+          ls -l eval_q8.bin
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
           path: |
             build/merged.bin
             build/eval.bin
+            build/eval_q8.bin
           if-no-files-found: error
 
   benchmark:
@@ -117,6 +132,15 @@ jobs:
             jmp shell --client-config /tmp/ci.yaml --selector board=esp32 -- \
             python scripts/eval.py firmware/eval.bin --golden eval/golden.json --out eval_result.json
 
+      - name: Correctness eval (Q8_0) — perplexity vs golden (via jumpstarter lease)
+        run: |
+          podman run --rm --network host --userns keep-id -e HOME=/tmp \
+            -v "$HOME/.config/jumpstarter/ci-client.yaml:/tmp/ci.yaml:ro,z" \
+            -v "$PWD:/workspace:z" -w /workspace \
+            quay.io/jumpstarter-dev/jumpstarter:latest \
+            jmp shell --client-config /tmp/ci.yaml --selector board=esp32 -- \
+            python scripts/eval.py firmware/eval_q8.bin --golden eval/golden_q8.json --out eval_q8_result.json
+
       - name: Fetch baseline
         run: |
           git fetch origin benchmark-data || true
@@ -136,7 +160,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 scripts/pr_comment.py \
-            --result result.json --eval eval_result.json --baseline baseline.json
+            --result result.json --eval eval_result.json \
+            --eval-q8 eval_q8_result.json --baseline baseline.json
 
       - name: Update baseline (main only)
         if: github.ref == 'refs/heads/main'

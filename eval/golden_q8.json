@@ -1,0 +1,9 @@
+{
+  "sentence": "One day, a clever fox found a shiny key under the old oak tree.",
+  "model": "stories260K_q8.bin",
+  "tokenizer": "tok512.bin",
+  "n_tokens": 35,
+  "nll": 54.310999,
+  "perplexity": 4.940084,
+  "tolerance": 0.02
+}

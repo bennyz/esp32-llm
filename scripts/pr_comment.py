@@ -7,7 +7,7 @@ and eval steps, reading the JSON they produced. It:
   * builds one markdown report (speed + correctness, with regression/drift
     verdicts) and writes it to the GitHub Actions step summary, and
   * upserts a marker-tagged "sticky" comment on the PR associated with the
-    pushed commit — created once, edited in place on subsequent pushes.
+    pushed commit - created once, edited in place on subsequent pushes.
 
 The workflow triggers on push (not pull_request, for hardware safety), so we
 discover the PR from the commit via the REST API. If the push has no open PR
@@ -47,7 +47,25 @@ def _api(method, url, token, body=None):
         return json.load(resp)
 
 
-def build_report(result, eval_result, baseline, threshold):
+def _correctness_lines(title, ev):
+    """Render one correctness (perplexity) section. Returns (lines, drifted)."""
+    drifted = not ev.get("passed", True)
+    lines = [
+        f"### {title} - perplexity {ev['device_perplexity']:.4f}",
+        "",
+        "| metric | value |",
+        "|--------|------:|",
+        f"| device perplexity | {ev['device_perplexity']:.4f} |",
+        f"| golden perplexity | {ev['golden_perplexity']:.4f} |",
+        f"| drift | {ev['drift']:.2%} (tolerance {ev['tolerance']:.0%}) |",
+        "",
+        "❌ **drifted** - model numerics changed" if drifted else "✅ within tolerance",
+        "",
+    ]
+    return lines, drifted
+
+
+def build_report(result, eval_result, eval_q8, baseline, threshold):
     # On pull_request, GITHUB_SHA is the temporary merge commit; prefer the
     # PR head sha for display when the workflow provides it.
     sha = os.environ.get("HEAD_SHA") or os.environ.get("GITHUB_SHA", "")
@@ -68,7 +86,7 @@ def build_report(result, eval_result, baseline, threshold):
 
     # ---- speed ----
     if result:
-        lines += [f"### Speed — {result['mean']:.2f} tok/s", ""]
+        lines += [f"### Speed - {result['mean']:.2f} tok/s", ""]
         if baseline:
             delta = (result["mean"] - baseline["mean"]) / baseline["mean"]
             regressed = delta < -threshold
@@ -93,7 +111,7 @@ def build_report(result, eval_result, baseline, threshold):
                 f"| min | {result['min']:.2f} |",
                 f"| max | {result['max']:.2f} |",
                 "",
-                "_no baseline yet — this run becomes the baseline on main_",
+                "_no baseline yet - this run becomes the baseline on main_",
             ]
         if result.get("quality_problems"):
             regressed = True
@@ -104,21 +122,13 @@ def build_report(result, eval_result, baseline, threshold):
 
     # ---- correctness ----
     if eval_result:
-        drifted = not eval_result.get("passed", True)
-        lines += [
-            f"### Correctness — perplexity {eval_result['device_perplexity']:.4f}",
-            "",
-            "| metric | value |",
-            "|--------|------:|",
-            f"| device perplexity | {eval_result['device_perplexity']:.4f} |",
-            f"| golden perplexity | {eval_result['golden_perplexity']:.4f} |",
-            f"| drift | {eval_result['drift']:.2%} (tolerance {eval_result['tolerance']:.0%}) |",
-            "",
-            "❌ **drifted** — model numerics changed"
-            if drifted
-            else "✅ within tolerance",
-            "",
-        ]
+        sub, d = _correctness_lines("Correctness (fp32)", eval_result)
+        lines += sub
+        drifted = drifted or d
+    if eval_q8:
+        sub, d = _correctness_lines("Correctness (int8 Q8_0)", eval_q8)
+        lines += sub
+        drifted = drifted or d
 
     # ---- footer ----
     chip = (result or {}).get("chip") or (eval_result or {}).get("chip") or "?"
@@ -159,15 +169,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result", default="result.json")
     parser.add_argument("--eval", dest="eval_result", default="eval_result.json")
+    parser.add_argument("--eval-q8", dest="eval_q8", default="eval_q8_result.json")
     parser.add_argument("--baseline", default="baseline.json")
     parser.add_argument("--threshold", type=float, default=0.05)
     args = parser.parse_args()
 
     result = _load(args.result)
     eval_result = _load(args.eval_result)
+    eval_q8 = _load(args.eval_q8)
     baseline = _load(args.baseline)
 
-    body, _ = build_report(result, eval_result, baseline, args.threshold)
+    body, _ = build_report(result, eval_result, eval_q8, baseline, args.threshold)
     print(body)
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -188,7 +200,7 @@ def main() -> int:
         pr_env = os.environ.get("PR_NUMBER")
         pr = int(pr_env) if pr_env else (find_pr(token, repo, sha) if sha else None)
         if pr is None:
-            print("no PR for this run — skipping PR comment (step summary written)", file=sys.stderr)
+            print("no PR for this run - skipping PR comment (step summary written)", file=sys.stderr)
             return 0
         upsert_comment(token, repo, pr, body)
     except urllib.error.HTTPError as e:
