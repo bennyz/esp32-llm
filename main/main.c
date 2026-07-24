@@ -145,7 +145,11 @@ void app_main(void)
     init_storage();
 
     // default parameters
-    char *checkpoint_path = "/data/stories260K.bin"; // e.g. out/model.bin
+#if CONFIG_LLM_MODEL_Q8
+    char *checkpoint_path = "/data/stories260K_q8.bin"; // Q8_0 quantized model
+#else
+    char *checkpoint_path = "/data/stories260K.bin"; // fp32 model
+#endif
     char *tokenizer_path = "/data/tok512.bin";
     float temperature = 1.0f;        // 0.0 = greedy deterministic. 1.0 = original. don't set higher
     float topp = 0.9f;               // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower

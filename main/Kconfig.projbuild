@@ -8,6 +8,17 @@ menu "Example Configuration"
             I2C. Disable when no display is attached, otherwise the u8g2
             HAL asserts on the failed I2C transaction.
 
+    config LLM_MODEL_Q8
+        bool "Use the Q8_0 quantized model"
+        default n
+        help
+            Load the group-wise int8 (Q8_0) quantized checkpoint
+            (stories260K_q8.bin) instead of the fp32 checkpoint. The firmware
+            auto-detects the format from the file's magic number; this option
+            only selects which file in the SPIFFS image to open. Both files
+            ship in the 'data' partition, so either can be selected without a
+            reflash of the model data.
+
     config LLM_FIXED_SEED
         int "Fixed RNG seed (0 = seed from time)"
         default 0
